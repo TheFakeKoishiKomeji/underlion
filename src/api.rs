@@ -114,7 +114,7 @@ pub struct File {
 	#[serde(rename = "fileLength")]
 	pub file_length: i64,
 	#[serde(rename = "downloadCount")]
-	pub download_count: i64,
+	pub download_count: f64, // CF WHY
 	#[serde(rename = "downloadUrl")]
 	pub download_url: String,
 	#[serde(rename = "gameVersions")]
