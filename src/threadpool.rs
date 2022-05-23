@@ -1,7 +1,6 @@
-use std::{sync::{Arc, atomic::{AtomicU32, Ordering}}, thread};
+use std::{sync::{Arc, atomic::{AtomicU32, Ordering}, Condvar, Mutex}, thread};
 
 use crossbeam_channel::Sender;
-use parking_lot::{Condvar, Mutex};
 
 pub struct ThreadPool<T: Send + 'static> {
 	threadcount: u32,
@@ -125,9 +124,9 @@ impl CountdownLatch {
 
 	pub fn wait(&self) {
 		if self.count.load(Ordering::Relaxed) > 0 {
-			let mut status_guard = self.status.lock();
+			let status_guard = self.status.lock().expect("Poisoned latch mutex!");
 			if !*status_guard {
-				self.var.wait(&mut status_guard);
+				let _ = self.var.wait(status_guard).expect("Poisoned latch mutex!");
 			}
 		}
 	}
@@ -135,7 +134,7 @@ impl CountdownLatch {
 	pub fn countdown(&self) {
 		let cur_count = self.count.fetch_sub(1, Ordering::Relaxed) - 1;
 		if cur_count <= 0 {
-			let mut status_guard = self.status.lock();
+			let mut status_guard = self.status.lock().expect("Poisoned latch mutex!");
 			*status_guard = true;
 			self.var.notify_all();
 		}
