@@ -1,6 +1,6 @@
-use std::{error::Error, io::Read, ops::{Deref, DerefMut}};
+use std::{error::Error, io::Read, ops::{Deref, DerefMut}, str::Utf8Error, string::FromUtf8Error};
 
-use reqwest::{StatusCode, blocking::Client};
+
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_repr::Deserialize_repr;
 
@@ -8,14 +8,13 @@ pub const CF_BASE_URL: &str = "https://api.curseforge.com/v1/";
 
 #[derive(Clone)]
 pub struct Curseforge {
-	key: String,
-	client: Client
+	key: String
 }
 
 impl Curseforge {
-	pub fn new(key: String, client: Client) -> Self {
+	pub fn new(key: String) -> Self {
 		Self {
-			key, client
+			key
 		}
 	}
 
@@ -51,43 +50,27 @@ impl Curseforge {
 
 	fn api_get<T: DeserializeOwned>(&self, suburl: &str) -> Result<T, ApiError> {
 		let query_url = format!("{}{}", CF_BASE_URL, suburl);
-		let mut response = self.client.get(&query_url)
-			.header("x-api-key", &self.key)
+		let response = minreq::get(&query_url)
+			.with_header("x-api-key", &self.key)
 			.send()
 			.ctx_error(&query_url)?;
-		response.status().ctx_error(&query_url)?;
-		let mut as_str = String::new();
-		response.read_to_string(&mut as_str).ctx_error(&query_url)?;
-		serde_json::from_str(&as_str).ctx_error((&query_url, &as_str))
+		response.status_code.ctx_error(&query_url)?;
+		let vec = response.into_bytes();
+		let response = String::from_utf8(vec).ctx_error(&query_url)?;
+		serde_json::from_str(&response).ctx_error((&query_url, &response))
 	}
 
 	fn api_post<T: DeserializeOwned, U: Serialize>(&self, suburl: &str, body: &U) -> Result<T, ApiError> {
 		let query_url = format!("{}{}", CF_BASE_URL, suburl);
 		let query_body = serde_json::to_string(body).ctx_error((&query_url, "N/A"))?;
-		let mut response = self.client.post(&query_url)
-			.header("x-api-key", &self.key)
-			.header("Content-Type", "application/json")
-			.header("Accept", "application/json")
-			.body(query_body)
+		let response = minreq::post(&query_url)
+			.with_header("x-api-key", &self.key)
 			.send()
 			.ctx_error(&query_url)?;
-		response.status().ctx_error(&query_url)?;
-		let mut as_str = String::new();
-		response.read_to_string(&mut as_str).ctx_error(&query_url)?;
-		serde_json::from_str(&as_str).ctx_error((&query_url, &as_str))
-	}
-}
-
-impl Deref for Curseforge {
-	type Target = Client;
-	fn deref(&self) -> &Client {
-		&self.client
-	}
-}
-
-impl DerefMut for Curseforge {
-	fn deref_mut(&mut self) -> &mut Client {
-		&mut self.client
+		response.status_code.ctx_error(&query_url)?;
+		let vec = response.into_bytes();
+		let response = String::from_utf8(vec).ctx_error(&query_url)?;
+		serde_json::from_str(&response).ctx_error((&query_url, &response))
 	}
 }
 
@@ -372,9 +355,10 @@ struct GetFilesBody<'a> {
 }
 
 pub enum ApiError {
-	HTTPError(reqwest::Error, String),
+	HTTPError(minreq::Error, String),
 	ResponseParseError(serde_json::Error, String, String),
-	BadHTTPResponse(String, StatusCode),
+	MalformedResponse(Utf8Error, String),
+	BadHTTPResponse(String, i32),
 	ForbiddenError(String),
 	NotFoundError(String),
 	ServerError(String),
@@ -398,13 +382,13 @@ impl ErrorContextualize<&str> for std::io::Error {
 	}
 }
 
-impl ErrorContextualize<&str> for StatusCode {
-	type Contextualized = Result<StatusCode, ApiError>;
+impl ErrorContextualize<&str> for i32 {
+	type Contextualized = Result<i32, ApiError>;
 	fn ctx_error(self, ctx: &str) -> Self::Contextualized {
-		if self.is_success() {
+		if self / 100 == 2 {
 			Ok(self)
 		} else { 
-			Err(match self.as_u16() {
+			Err(match self {
 				403 => ApiError::ForbiddenError(ctx.to_string()),
 				404 => ApiError::NotFoundError(ctx.to_string()),
 				500 => ApiError::ServerError(ctx.to_string()),
@@ -414,7 +398,7 @@ impl ErrorContextualize<&str> for StatusCode {
 	}
 }
 
-impl ErrorContextualize<&str> for reqwest::Error {
+impl ErrorContextualize<&str> for minreq::Error {
 	type Contextualized = ApiError;
 	fn ctx_error(self, ctx: &str) -> Self::Contextualized {
 		ApiError::HTTPError(self, ctx.to_string())
@@ -435,6 +419,20 @@ impl ErrorContextualize<&str> for Box<dyn Error> {
 	}
 }
 
+impl ErrorContextualize<&str> for Utf8Error {
+	type Contextualized = ApiError;
+	fn ctx_error(self, ctx: &str) -> Self::Contextualized {
+		ApiError::MalformedResponse(self, ctx.to_string())
+	}
+}
+
+impl ErrorContextualize<&str> for FromUtf8Error {
+	type Contextualized = ApiError;
+	fn ctx_error(self, ctx: &str) -> Self::Contextualized {
+		self.utf8_error().ctx_error(ctx)
+	}
+}
+
 impl ToString for ApiError {
 	fn to_string(&self) -> String {
 		match self {
@@ -444,7 +442,8 @@ impl ToString for ApiError {
 			Self::NotFoundError(url) => format!("URL {} returned 404 Not Found", url),
 			Self::ServerError(url) => format!("URL {} returned 500 Server Error", url),
 			Self::OtherError(url, err) => format!("Error requesting API at {}: {}", url, err),
-			Self::BadHTTPResponse(url, code ) => format!("URL {} returned HTTP error {}", url, code)
+			Self::BadHTTPResponse(url, code ) => format!("URL {} returned HTTP error {}", url, code),
+			Self::MalformedResponse(error, url) => format!("URL {} responded with malformed UTF-8: {}", url, error)
 		}
 	}
 }

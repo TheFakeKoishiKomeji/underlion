@@ -7,7 +7,6 @@ use std::{fs::{self, File}, io::{Cursor, Read, Seek, Write}, path::{Path, PathBu
 use api::Curseforge;
 use manifest::*;
 use regex::Regex;
-use reqwest::blocking::Client;
 use threadpool::{BranchedExecutor, ThreadPool};
 use clap::{Parser, Subcommand};
 use zip::{ZipArchive, read::ZipFile};
@@ -69,12 +68,12 @@ fn run_command(args: Args) -> Result<(), String> {
 						}
 					},
 					move || {
-						Curseforge::new(key.clone(), Client::new())
+						Curseforge::new(key.clone())
 					}
 				);
 				BranchedExecutor::Pooled(pool)
 			} else {
-				let cf = Curseforge::new(key, Client::new());
+				let cf = Curseforge::new(key);
 				BranchedExecutor::ThisThread(Box::new(move |file| {
 					if let Err(e) = download(&file, &cf, &mv_mods) {
 						println!("{}", e);
@@ -96,14 +95,18 @@ fn run_command(args: Args) -> Result<(), String> {
 					}
 				}
 			}
-			println!("{:?}", fnames);
+			
 			for fname in fnames {
 				let mut entry = try_read_zip_entry(&mut pack, &fname)?;
 				if entry.is_file() {
-					let name = entry.enclosed_name().try_expect("Could not properly format name for writing to filesystem")?;
+					let name = entry
+						.enclosed_name()
+						.try_expect("Could not properly format name for writing to filesystem")?
+						.strip_prefix(&format!("{}/", manifest.overrides))
+						.stringify_error("Error converting path")?
+						.to_owned();
 					let mut ext_path = install_to_path.clone();
 					ext_path.push(name);
-					println!("{:?}", ext_path);
 					if let Some(p) = ext_path.parent() {
 						try_mkdir(&p)?;
 					}
@@ -125,7 +128,7 @@ fn run_command(args: Args) -> Result<(), String> {
 			let key = get_key(key, &key_file)?.trim().to_string();
 
 			let mut mod_ids = Vec::new();
-			let cf = Curseforge::new(key, Client::new());
+			let cf = Curseforge::new(key);
 			for file in manifest.files {
 				mod_ids.push(file.project_id);
 			}
@@ -157,13 +160,10 @@ fn run_command(args: Args) -> Result<(), String> {
 }
 
 fn grab_key(cf_url: &str) -> Result<(), String> {
-	let client = Client::builder()
-		.timeout(None)
-		.build().unwrap();
-	let response = client.get(cf_url)
+	let response = minreq::get(cf_url)
 		.send()
 		.stringify_error("Error making request to CF download")?;
-	let bytes = response.bytes().stringify_error("Error reading CF download response")?;
+	let bytes = response.into_bytes();
 
 	let mut cf_zip = ZipArchive::new(Cursor::new(bytes)).stringify_error("Error reading CF download as zip")?;
 	let mut file_with_token = try_read_zip_entry(&mut cf_zip, KEY_GRAB_LOCATION)?;
@@ -185,18 +185,19 @@ fn read_key_from_str(key_file: &str) -> Result<String, String> {
 
 fn download(file: &FileInfo, cf: &Curseforge, mods_dir: &Path) -> Result<(), String> {
 	let url = cf.get_download_url(file.project_id, file.file_id).stringify_error("Error fetching download URL")?;
-	let mut response = match cf.get(&url).send() {
+	println!("Downloading {}", &url);
+	let response = match minreq::get(&url).send() {
 		Ok(r) => Ok(r),
 		Err(e) => Err(format!("Error downloading file {}: {}", url, e))
 	}?;
-	if !response.status().is_success() {
-		Err(format!("HTTP Error downloading file {}: {}", url, response.status()))
+	if response.status_code / 100 != 2 {
+		Err(format!("HTTP Error downloading file {}: {}", url, response.status_code))
 	} else {
 		let mut path = mods_dir.to_path_buf();
-		let filename = response.url().path_segments().expect("Malformed URL").last().expect("Malformed URL").to_string();
+		let filename = url.split("/").last().try_expect("Error getting filename, does URL have no slashes?")?;
 		path.push(&filename);
 		let mut file = try_open_write(&path)?;
-		if let Err(e) = response.copy_to(&mut file) {
+		if let Err(e) = file.write_all(response.as_bytes()) {
 			Err(format!("Error writing downloaded file {}: {}", filename, e))
 		} else {
 			Ok(())
