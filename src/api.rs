@@ -65,6 +65,9 @@ impl Curseforge {
 		let query_body = serde_json::to_string(body).ctx_error((&query_url, "N/A"))?;
 		let response = minreq::post(&query_url)
 			.with_header("x-api-key", &self.key)
+			.with_header("Content-Type", "application/json")
+			.with_header("Accept", "application/json")
+			.with_body(query_body.as_bytes())
 			.send()
 			.ctx_error(&query_url)?;
 		response.status_code.ctx_error(&query_url)?;
