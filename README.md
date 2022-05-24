@@ -39,3 +39,6 @@ Options:
 	Use an alternate URL to download the CF overwolf extension. (Overrides `--cf-version`)  
 * `-v`,  `--cf-version VERSION`  
 	Use an alternate version of the CF overwolf extension.  
+
+## Support and Updates:
+Check out my discord! https://discord.gg/w3EMU2Q2N3
